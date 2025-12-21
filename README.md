@@ -41,6 +41,7 @@ done
 
 ### Cấu trúc thư mục
 
+````
 raft-implementation/
 ├── main.py ← Start 1 node
 ├── scripts/
@@ -58,10 +59,12 @@ raft-implementation/
 ├── config/
 │ └── cluster_config.yaml ← Configuration
 ├── data/ ← Persistent storage (auto-created)
-└── logs/ ← Log files (auto-created)
+└── logs/ ← Log files (auto-created)```
+````
 
 ### Quy trình khởi động và hoạt động của cluster RAFT
 
+```
 USER ACTION
 └── python scripts/start_cluster.py
 
@@ -110,3 +113,5 @@ USER ACTION
    └── If majority → Become LEADER
    └── Start heartbeat_loop (thread)
    └── Send AppendEntries to followers
+
+```
