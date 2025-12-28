@@ -99,9 +99,12 @@ class ProtoCompiler:
     def prepare(self):
         """Chuẩn bị môi trường: clean và compile"""
         logger.info("Starting proto preparation...")
+        # comment these 3 lines to run client, this code only for compile .proto
         # self.clean_generated_files()
         # self.compile_proto()
         # self.fix_imports()
+        # -------------------------------------------------------------
+        
         logger.info("Proto preparation completed!")
         return True
 
@@ -131,10 +134,12 @@ class RaftServicer:
     def AppendEntries(self, request, context):
         """Handle AppendEntries RPC"""
         from src.generated import raft_pb2
+        # logger.info(f"[SERVER/AppendEntries] request =  {request}")
         
-        is_heartbeat = len(request.entries) == 0
-        if not is_heartbeat:
-            logger.info(f"Received AppendEntries from {request.leader_id}, {len(request.entries)} entries")
+        if len(request.entries) > 0:
+            logger.info(f"[Follower received AppendEntries] from {request.leader_id}, {len(request.entries)} entries")
+        else:
+            logger.info(f"[Follower received AppendEntries] [HEARTBEAT] from node {request.leader_id}")
         
         response = self.node.handle_append_entries(request)
         

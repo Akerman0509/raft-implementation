@@ -104,7 +104,7 @@ def setup_logging(node_id, debug=False):
     log_dir.mkdir(exist_ok=True)
     
     # Add file handler
-    file_handler = logging.FileHandler(log_dir / f'{node_id}.log')
+    file_handler = logging.FileHandler(log_dir / f'{node_id}.log',mode='w')
     file_handler.setLevel(level)
     file_handler.setFormatter(
         logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')

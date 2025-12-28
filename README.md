@@ -35,6 +35,12 @@ Triển khai thuật toán đồng thuận RAFT sử dụng Python và gRPC vớ
 
 ### Lệnh chạy
 
+#### Compile file
+
+python -m src.server
+
+#### Run node in separate terminals (change ptyxis to your terminal)
+
 for i in {1..5}; do \
 ptyxis -e bash -lc "conda activate image_manager && python main.py --node-id node$i --port $((50050+i)); exec bash" & \
 done

@@ -7,6 +7,8 @@ import time
 import random
 import logging
 import threading
+import yaml
+
 from enum import Enum
 from typing import Dict, List, Optional
 from pathlib import Path
@@ -43,6 +45,7 @@ class RaftNode:
         self.host = host
         self.port = port
         self.address = f"{host}:{port}"
+        self.status = "up"
         
         # Cluster configuration
         self.cluster_config = cluster_config
@@ -56,6 +59,9 @@ class RaftNode:
         self.votes_received = 0
         self.majority = 0
         self.votes_from = set()
+        # append entries
+        self.ack_entries_from = set()
+        
         
         
         # Node state
@@ -92,28 +98,78 @@ class RaftNode:
         self.lock = threading.RLock()
         
         # Disconnected nodes (for testing)
-        self.disconnected_nodes = set()
         
         logger.info(f"RAFT Node initialized: {node_id} at {self.address}")
         logger.info(f"Peers: {list(self.peers.keys())}")
     
+    def _update_node_config(self, config_file='config/cluster_config.yaml'): 
+        """Load cluster configuration"""
+        config_path = Path(config_file)
+        config = None
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+        with open(config_path, 'r') as f:
+            new_config =  yaml.safe_load(f)
+        # print ("new config", new_config)
+        # update status
+        for node in new_config['cluster']['nodes']:
+            if node['id'] == self.node_id:
+                self.status = node['status']
+                break
+        # update partition peers
+        self.peers = self._build_peer_list(new_config, self.node_id)
+        # update client_pool
+        self._setup_client_pool()
+        # logger.info (f"[POOL] after update = {list(self.client_pool.clients.keys())}")
+        
+        
+    def _get_node_partition(self, config: Dict, node_id: str) -> Optional[set]:
+        partitions = config["cluster"].get('partitions', [])
+
+        if not partitions or partitions[0].get('status') != 'enabled':
+            return None  # không phân mảnh
+
+        for p in partitions[1:]:
+            if node_id in p.get('nodes', []):
+                return set(p['nodes'])
+        
+        return set() 
+    
     def _build_peer_list(self, config: Dict, node_id: str) -> Dict[str, Dict]:
-        """Build list of peer nodes"""
         peers = {}
+        # Xác định partition của node hiện tại
+        visible_nodes = self._get_node_partition(config, node_id)
         for node in config['cluster']['nodes']:
-            if node['id'] != node_id:
-                peers[node['id']] = {
-                    'host': node['host'],
-                    'port': node['port'],
-                    'address': f"{node['host']}:{node['port']}"
-                }
+            peer_id = node['id']
+            if peer_id == node_id:
+                continue
+            # Nếu partition enabled → chỉ thấy node cùng partition
+            if visible_nodes is not None and peer_id not in visible_nodes:
+                continue
+            peers[peer_id] = {
+                'host': node['host'],
+                'port': node['port'],
+                'address': f"{node['host']}:{node['port']}"
+            }
         return peers
     
     def _setup_client_pool(self):
         """Setup client connections to peers"""
         for peer_id, peer_info in self.peers.items():
-            self.client_pool.add_node(peer_id, peer_info['host'], peer_info['port'])
-    
+            if self.client_pool.get_client(peer_id) is None:
+                self.client_pool.add_node(peer_id, peer_info['host'], peer_info['port'])
+        # delete client in pool in new config
+        stale_clients = [
+            client_id
+            for client_id in self.client_pool.clients.keys()
+            if client_id not in self.peers
+        ]
+        for client_id in stale_clients:
+            self.client_pool.remove_node(client_id)
+            
+            
+            
+        
     def _random_election_timeout(self) -> float:
         """Generate random election timeout"""
         min_timeout = self.cluster_config['raft']['election_timeout_min'] / 1000.0
@@ -161,6 +217,7 @@ class RaftNode:
                     self._start_election()
     
     def _start_election(self):
+        self._update_node_config()
         """Start leader election"""
         # Transition to candidate
         self.state = NodeState.CANDIDATE
@@ -190,10 +247,6 @@ class RaftNode:
         last_log_term = self.log_manager.get_last_log_term()
         
         for peer_id in self.peers.keys():
-            if peer_id in self.disconnected_nodes:
-                logger.debug(f"Skipping disconnected peer: {peer_id}")
-                continue
-            
             # Send RequestVote in parallel
             threading.Thread(
                 target=self._request_vote_from_peer,
@@ -205,9 +258,8 @@ class RaftNode:
     def _request_vote_from_peer(self, peer_id: str, last_log_index: int, last_log_term: int):
         """Request vote from a specific peer"""
         client = self.client_pool.get_client(peer_id)
-        if not client:
+        if client is None:
             return
-        
         response = client.request_vote(
             term=self.current_term,
             candidate_id=self.node_id,
@@ -231,13 +283,14 @@ class RaftNode:
                     if peer_id in self.votes_from:
                         logger.debug(f"Duplicate vote from {peer_id} ignored")
                         return
+                    self.votes_from.add(peer_id)
                     self.votes_received += 1
                     logger.info(
                         f"✅ Vote from {peer_id} "
                         f"({self.votes_received}/{self.majority})"
                     )
                
-                    if self.votes_received >= self.majority:
+                    if len(self.votes_from) >= self.majority:
                         self._become_leader()
                     
                     
@@ -268,10 +321,8 @@ class RaftNode:
     
     def _send_heartbeats(self):
         """Send heartbeat to all followers"""
+        self.ack_entries_from.clear()
         for peer_id in self.peers.keys():
-            if peer_id in self.disconnected_nodes:
-                continue
-            
             threading.Thread(
                 target=self._send_append_entries_to_peer,
                 args=(peer_id,),
@@ -279,10 +330,15 @@ class RaftNode:
             ).start()
     
     def _send_append_entries_to_peer(self, peer_id: str):
+        self._update_node_config()
+        # self.status == down 
+        
+        
         """Send AppendEntries RPC to a peer"""
         client = self.client_pool.get_client(peer_id)
         if not client:
             return
+        
         
         # Get log entries to send
         next_idx = self.next_index.get(peer_id, 1)
@@ -312,9 +368,16 @@ class RaftNode:
                     if entries:
                         self.match_index[peer_id] = prev_log_index + len(entries)
                         self.next_index[peer_id] = self.match_index[peer_id] + 1
+                        self.ack_entries_from.add(peer_id)
                 else:
                     # Decrement next_index and retry
                     self.next_index[peer_id] = max(1, self.next_index[peer_id] - 1)
+                    
+                if len(self.ack_entries_from) + 1 < self.majority :
+                    logger.debug(f"[_send_append_entries_to_peer] Not enough acks yet from {list(self.peers.keys())}, start Voting again") 
+                    self.ack_entries_from.clear()
+                    self._start_election()
+                    
     
     def _revert_to_follower(self, term: int):
         """Revert to follower state"""
@@ -353,7 +416,14 @@ class RaftNode:
                 request.last_log_term > last_log_term or
                 (request.last_log_term == last_log_term and request.last_log_index >= last_log_index)
             )
-            
+                # test case 1: Split vote scenario => increase term and start again
+            # if self.node_id == 'node1' and request.candidate_id == 'node2':
+            #     if can_vote and log_ok:
+            #         self.voted_for = request.candidate_id
+            #         response['vote_granted'] = True
+            #         self.last_heartbeat_time = time.time()
+            #         logger.info(f"✅ Voted for {request.candidate_id} in term {request.term}")
+            # if self.node_id == 'node3' and request.candidate_id == 'node4':
             if can_vote and log_ok:
                 self.voted_for = request.candidate_id
                 response['vote_granted'] = True
@@ -389,9 +459,9 @@ class RaftNode:
                 return response
             
             # Append entries
-            if request.entries:
+            if len(request.entries) > 0:
                 self.log_manager.append_entries(request.prev_log_index, list(request.entries))
-                logger.info(f"Appended {len(request.entries)} entries")
+                logger.info(f"[FOLLOWER/handle_append_entries] Appended {len(request.entries)} entries")
             
             # Update commit index
             if request.leader_commit > self.commit_index:

@@ -5,18 +5,35 @@ cluster:
         - id: "node1"
           host: "localhost"
           port: 50051
+          status: "up"
         - id: "node2"
           host: "localhost"
           port: 50052
+          status: "up"
+          # status: "down"
+
         - id: "node3"
           host: "localhost"
           port: 50053
+          status: "up"
+
         - id: "node4"
           host: "localhost"
           port: 50054
-        - id: "node5"
-          host: "localhost"
-          port: 50055
+          status: "up"
+
+        # - id: "node5"
+        #   host: "localhost"
+        #   port: 50055
+        #   status: "up"
+
+    partitions:
+        # - status: "enabled"
+        - status: "disabled"
+        - id: "partition1"
+          nodes: ["node1", "node2"]
+        - id: "partition2"
+          nodes: ["node3", "node4"]
 
 raft:
     # Election timeout range (ms)
@@ -24,7 +41,7 @@ raft:
     election_timeout_max: 3000
 
     # Heartbeat interval (ms)
-    heartbeat_interval: 300
+    heartbeat_interval: 2000
 
     # RPC timeout (ms)
     rpc_timeout: 100

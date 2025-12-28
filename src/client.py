@@ -109,6 +109,15 @@ class RaftClient:
                 entries=log_entries,
                 leader_commit=leader_commit
             )
+            logger.info(
+                "[Leader send AppendEntries] term=%d leader=%s prev_idx=%d prev_term=%d entries=%d commit=%d",
+                request.term,
+                request.leader_id,
+                request.prev_log_index,
+                request.prev_log_term,
+                len(request.entries),
+                request.leader_commit
+            )
             
             response = self.stub.AppendEntries(request, timeout=self.timeout)
             
@@ -169,23 +178,6 @@ class RaftClient:
             logger.error(f"DisconnectNodes error: {e}")
             return None
     
-    def heartbeat(self, node_id: str) -> Optional[Dict]:
-        """Check node health"""
-        try:
-            from src.generated import raft_pb2
-            
-            request = raft_pb2.HeartbeatRequest(node_id=node_id)
-            response = self.stub.Heartbeat(request, timeout=self.timeout)
-            
-            return {
-                'alive': response.alive,
-                'term': response.term,
-                'state': response.state
-            }
-            
-        except Exception as e:
-            logger.error(f"Heartbeat error: {e}")
-            return None
     
     def get_status(self, requesting_node_id: str = "admin") -> Optional[Dict]:
         """Lấy status của node"""
@@ -224,21 +216,22 @@ class RaftClientPool:
     def add_node(self, node_id: str, host: str, port: int):
         """Thêm node vào pool"""
         client = RaftClient(host, port)
-        self.clients[node_id] = client
-        logger.info(f"Added node {node_id} to client pool")
+        if client.connect():
+            self.clients[node_id] = client
+            logger.info(f"Added node {node_id} to client pool")
+            return
+        logger.error("Failed to connect to %s", node_id)
+        
+    def remove_node(self, node_id: str):
+        """Xóa node khỏi pool"""
+        if node_id in self.clients:
+            self.clients[node_id].close()
+            del self.clients[node_id]
+            logger.info(f"Deleted node {node_id} from client pool")
     
     def get_client(self, node_id: str) -> Optional[RaftClient]:
-        """Lấy client đến một node"""
-        if node_id in self.disconnected_nodes:
-            logger.warning(f"Node {node_id} is disconnected")
-            return None
-        
-        client = self.clients.get(node_id)
-        if client:
-            if not client.channel:
-                client.connect()
-            return client
-        return None
+        client = self.clients.get(node_id, None)
+        return client
     
     def broadcast_request_vote(self, term: int, candidate_id: str,
                               last_log_index: int, last_log_term: int) -> List[Dict]:
@@ -247,7 +240,6 @@ class RaftClientPool:
         for node_id, client in self.clients.items():
             if node_id == candidate_id or node_id in self.disconnected_nodes:
                 continue
-            
             if not client.channel:
                 client.connect()
             
@@ -280,12 +272,12 @@ class RaftCLI:
     
     def __init__(self, cluster_config: Dict):
         self.pool = RaftClientPool(cluster_config)
-        self.setup_cluster(cluster_config)
+    #     self.setup_cluster(cluster_config)
     
-    def setup_cluster(self, config: Dict):
-        """Setup client pool từ config"""
-        for node in config['cluster']['nodes']:
-            self.pool.add_node(node['id'], node['host'], node['port'])
+    # def setup_cluster(self, config: Dict):
+    #     """Setup client pool từ config"""
+    #     for node in config['cluster']['nodes']:
+    #         self.pool.add_node(node['id'], node['host'], node['port'])
     
     def print_header(self, title: str):
         """In header đẹp"""

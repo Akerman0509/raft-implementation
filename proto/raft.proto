@@ -16,9 +16,6 @@ service RaftService {
   // Network partition simulation
   rpc DisconnectNodes(DisconnectRequest) returns (DisconnectResponse);
   
-  // Health check
-  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
-  
   // Get node status
   rpc GetStatus(StatusRequest) returns (StatusResponse);
 }
@@ -85,16 +82,6 @@ message DisconnectResponse {
   string message = 2;
 }
 
-// Heartbeat
-message HeartbeatRequest {
-  string node_id = 1;
-}
-
-message HeartbeatResponse {
-  bool alive = 1;
-  int32 term = 2;
-  string state = 3;             // "FOLLOWER", "CANDIDATE", "LEADER"
-}
 
 // Status request
 message StatusRequest {

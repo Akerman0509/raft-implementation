@@ -55,11 +55,6 @@ class RaftServiceStub(object):
                 request_serializer=raft__pb2.DisconnectRequest.SerializeToString,
                 response_deserializer=raft__pb2.DisconnectResponse.FromString,
                 _registered_method=True)
-        self.Heartbeat = channel.unary_unary(
-                '/raft.RaftService/Heartbeat',
-                request_serializer=raft__pb2.HeartbeatRequest.SerializeToString,
-                response_deserializer=raft__pb2.HeartbeatResponse.FromString,
-                _registered_method=True)
         self.GetStatus = channel.unary_unary(
                 '/raft.RaftService/GetStatus',
                 request_serializer=raft__pb2.StatusRequest.SerializeToString,
@@ -99,13 +94,6 @@ class RaftServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def Heartbeat(self, request, context):
-        """Health check
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
     def GetStatus(self, request, context):
         """Get node status
         """
@@ -135,11 +123,6 @@ def add_RaftServiceServicer_to_server(servicer, server):
                     servicer.DisconnectNodes,
                     request_deserializer=raft__pb2.DisconnectRequest.FromString,
                     response_serializer=raft__pb2.DisconnectResponse.SerializeToString,
-            ),
-            'Heartbeat': grpc.unary_unary_rpc_method_handler(
-                    servicer.Heartbeat,
-                    request_deserializer=raft__pb2.HeartbeatRequest.FromString,
-                    response_serializer=raft__pb2.HeartbeatResponse.SerializeToString,
             ),
             'GetStatus': grpc.unary_unary_rpc_method_handler(
                     servicer.GetStatus,
@@ -256,33 +239,6 @@ class RaftService(object):
             '/raft.RaftService/DisconnectNodes',
             raft__pb2.DisconnectRequest.SerializeToString,
             raft__pb2.DisconnectResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def Heartbeat(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/raft.RaftService/Heartbeat',
-            raft__pb2.HeartbeatRequest.SerializeToString,
-            raft__pb2.HeartbeatResponse.FromString,
             options,
             channel_credentials,
             insecure,
