@@ -59,8 +59,6 @@ class RaftNode:
         self.votes_received = 0
         self.majority = 0
         self.votes_from = set()
-        # append entries
-        self.ack_entries_from = set()
         
         
         
@@ -321,7 +319,6 @@ class RaftNode:
     
     def _send_heartbeats(self):
         """Send heartbeat to all followers"""
-        self.ack_entries_from.clear()
         for peer_id in self.peers.keys():
             threading.Thread(
                 target=self._send_append_entries_to_peer,
@@ -368,15 +365,10 @@ class RaftNode:
                     if entries:
                         self.match_index[peer_id] = prev_log_index + len(entries)
                         self.next_index[peer_id] = self.match_index[peer_id] + 1
-                        self.ack_entries_from.add(peer_id)
                 else:
                     # Decrement next_index and retry
                     self.next_index[peer_id] = max(1, self.next_index[peer_id] - 1)
-                    
-                if len(self.ack_entries_from) + 1 < self.majority :
-                    logger.debug(f"[_send_append_entries_to_peer] Not enough acks yet from {list(self.peers.keys())}, start Voting again") 
-                    self.ack_entries_from.clear()
-                    self._start_election()
+
                     
     
     def _revert_to_follower(self, term: int):

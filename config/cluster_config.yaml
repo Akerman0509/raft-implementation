@@ -22,10 +22,10 @@ cluster:
           port: 50054
           status: "up"
 
-        # - id: "node5"
-        #   host: "localhost"
-        #   port: 50055
-        #   status: "up"
+        - id: "node5"
+          host: "localhost"
+          port: 50055
+          status: "up"
 
     partitions:
         # - status: "enabled"
@@ -33,7 +33,7 @@ cluster:
         - id: "partition1"
           nodes: ["node1", "node2"]
         - id: "partition2"
-          nodes: ["node3", "node4"]
+          nodes: ["node3", "node4", "node5"]
 
 raft:
     # Election timeout range (ms)
