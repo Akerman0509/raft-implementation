@@ -104,7 +104,12 @@ class LogManager:
         """Get term of last log entry"""
         if len(self.logs) == 0:
             return 0
-        return self.logs[-1]['term']
+        last_entry = self.logs[-1]
+        
+        if isinstance(last_entry, dict):
+            return last_entry.get('term', 0)
+        else:
+            return getattr(last_entry, 'term', 0)
     
     def get_log_term(self, index: int) -> int:
         """Get term of log entry at specific index"""

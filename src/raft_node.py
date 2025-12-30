@@ -100,6 +100,15 @@ class RaftNode:
         logger.info(f"RAFT Node initialized: {node_id} at {self.address}")
         logger.info(f"Peers: {list(self.peers.keys())}")
     
+    def _load_config_from_file(self):
+        # Readfile YAML 
+        try:
+            with open('config/cluster_config.yaml', 'r') as f:
+                return yaml.safe_load(f)
+        except Exception as e:
+            logger.error(f"Error loading config file: {e}")
+            return self.cluster_config
+        
     def _update_node_config(self, config_file='config/cluster_config.yaml'): 
         """Load cluster configuration"""
         config_path = Path(config_file)
@@ -114,6 +123,10 @@ class RaftNode:
             if node['id'] == self.node_id:
                 self.status = node['status']
                 break
+              
+        if self.status == 'down':
+            logger.warning(f"Node {self.node_id} is marked as DOWN via config")
+
         # update partition peers
         self.peers = self._build_peer_list(new_config, self.node_id)
         # update client_pool
@@ -203,7 +216,11 @@ class RaftNode:
         """Election timer loop"""
         while self.running:
             time.sleep(0.05)  # Check every 10ms
-            
+
+            if self.status == 'down':
+                time.sleep(1)
+                continue
+
             with self.lock:
                 if self.state == NodeState.LEADER:
                     continue
@@ -213,6 +230,8 @@ class RaftNode:
                 if elapsed >= self.election_timeout:
                     logger.info(f"Election timeout! Starting election (elapsed: {elapsed:.2f}s)")
                     self._start_election()
+
+            
     
     def _start_election(self):
         self._update_node_config()
@@ -227,14 +246,22 @@ class RaftNode:
         self.election_timeout = self._random_election_timeout()
         self.last_heartbeat_time = time.time()
         
-        logger.info(f"🗳️  Starting election for term {self.current_term}")
+        logger.info(f"Starting election for term {self.current_term}")
         
         # Vote for self
         self.votes_received = 1
         # clean set ()
         self.votes_from.clear()
         self.votes_from = {self.node_id}   # self-vote
-        total_nodes = len(self.peers) + 1
+        try:
+            config = self._load_config_from_file()
+            all_nodes_list = config['cluster']['nodes']
+            total_nodes = len(all_nodes_list)
+        except Exception as e:
+            logger.error(f"Error reading config for quorum: {e}")
+            # Fallback if error
+            total_nodes = len(self.peers) + 1
+
         majority = (total_nodes // 2) + 1
         self.majority = majority
         
@@ -284,7 +311,7 @@ class RaftNode:
                     self.votes_from.add(peer_id)
                     self.votes_received += 1
                     logger.info(
-                        f"✅ Vote from {peer_id} "
+                        f"Vote from {peer_id} "
                         f"({self.votes_received}/{self.majority})"
                     )
                
@@ -295,7 +322,7 @@ class RaftNode:
     
     def _become_leader(self):
         """Transition to leader"""
-        logger.info(f"👑 Became LEADER for term {self.current_term}")
+        logger.info(f"Became LEADER for term {self.current_term}")
         
         self.state = NodeState.LEADER
         self.leader_id = self.node_id
@@ -319,6 +346,9 @@ class RaftNode:
     
     def _send_heartbeats(self):
         """Send heartbeat to all followers"""
+        if self.status == 'down':
+            return
+        
         for peer_id in self.peers.keys():
             threading.Thread(
                 target=self._send_append_entries_to_peer,
@@ -384,6 +414,11 @@ class RaftNode:
     
     def handle_request_vote(self, request) -> Dict:
         """Handle RequestVote RPC"""
+
+        self._update_node_config() 
+        if self.status == 'down':
+            return {'term': self.current_term, 'vote_granted': False}
+        
         with self.lock:
             response = {
                 'term': self.current_term,
@@ -420,12 +455,17 @@ class RaftNode:
                 self.voted_for = request.candidate_id
                 response['vote_granted'] = True
                 self.last_heartbeat_time = time.time()
-                logger.info(f"✅ Voted for {request.candidate_id} in term {request.term}")
+                logger.info(f"Voted for {request.candidate_id} in term {request.term}")
             
             return response
     
     def handle_append_entries(self, request) -> Dict:
         """Handle AppendEntries RPC"""
+
+        self._update_node_config() 
+        if self.status == 'down':
+            return {'term': self.current_term, 'success': False}
+        
         with self.lock:
             response = {
                 'term': self.current_term,
@@ -452,8 +492,18 @@ class RaftNode:
             
             # Append entries
             if len(request.entries) > 0:
-                self.log_manager.append_entries(request.prev_log_index, list(request.entries))
-                logger.info(f"[FOLLOWER/handle_append_entries] Appended {len(request.entries)} entries")
+                entries_to_save = []
+                for entry in request.entries:
+                    entries_to_save.append({
+                        'term': entry.term,
+                        'index': entry.index,
+                        'command': entry.command,
+                        'client_id': getattr(entry, 'client_id', None) # Dùng getattr phòng trường hợp thiếu trường này
+                    })
+                
+                # Lưu list dictionary vào log manager thay vì list object
+                self.log_manager.append_entries(request.prev_log_index, entries_to_save)
+                logger.info(f"[FOLLOWER] Appended {len(entries_to_save)} entries")
             
             # Update commit index
             if request.leader_commit > self.commit_index:
@@ -465,6 +515,15 @@ class RaftNode:
     
     def handle_client_request(self, request) -> Dict:
         """Handle client request"""
+        self._update_node_config()
+        if self.status == 'down':
+            logger.warning(f"Node {self.node_id} is DOWN. Rejecting client request.")
+            return {
+                'success': False,
+                'error': 'Node is down',
+                'leader_id': None
+            }
+        
         with self.lock:
             # Only leader handles client requests
             if self.state != NodeState.LEADER:
@@ -507,15 +566,37 @@ class RaftNode:
             # Replicate to followers (simplified - would wait for majority)
             self._send_heartbeats()
             
-            # For simplicity, commit immediately (in real impl, wait for majority)
-            time.sleep(0.05)
-            self.commit_index = self.log_manager.get_last_log_index()
-            self._apply_committed_entries()
+            # Đếm số lượng node đang hoạt động (dựa trên config)
+            # Trong thực tế, ta đếm match_index, nhưng ở đây dùng config để giả lập nhanh
+            active_nodes = 1 # Tính cả bản thân Leader
+            current_config = self._load_config_from_file() # Hàm đọc file yaml
             
-            return {
-                'success': True,
-                'result': 'OK'
-            }
+            for node in current_config['cluster']['nodes']:
+                if node['id'] != self.node_id and node.get('status') == 'up':
+                    active_nodes += 1
+            
+            total_nodes = len(current_config['cluster']['nodes'])
+            quorum = (total_nodes // 2) + 1
+
+            # Chờ một chút giả lập độ trễ mạng
+            time.sleep(0.05)
+
+            if active_nodes >= quorum:
+                # Đủ quorum -> Commit
+                self.commit_index = self.log_manager.get_last_log_index()
+                self._apply_committed_entries()
+                return {
+                    'success': True,
+                    'result': 'OK'
+                }
+            else:
+                # Không đủ quorum -> Không commit -> Trả về lỗi
+                logger.error(f"Cannot commit. Active: {active_nodes}/{total_nodes} (Need {quorum})")
+                return {
+                    'success': False,
+                    'error': 'Cluster currently unavailable (No Quorum)',
+                    'leader_id': self.leader_id
+                }
     
     def _apply_committed_entries(self):
         """Apply committed entries to state machine"""
