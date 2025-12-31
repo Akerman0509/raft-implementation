@@ -111,27 +111,40 @@ class RaftNode:
         
     def _update_node_config(self, config_file='config/cluster_config.yaml'): 
         """Load cluster configuration"""
-        config_path = Path(config_file)
-        config = None
-        if not config_path.exists():
-            raise FileNotFoundError(f"Config file not found: {config_path}")
-        with open(config_path, 'r') as f:
-            new_config =  yaml.safe_load(f)
-        # print ("new config", new_config)
-        # update status
-        for node in new_config['cluster']['nodes']:
-            if node['id'] == self.node_id:
-                self.status = node['status']
-                break
-              
-        if self.status == 'down':
-            logger.warning(f"Node {self.node_id} is marked as DOWN via config")
+        try:
+            config_path = Path(config_file)
+            if not config_path.exists():
+                logger.error(f"Config file not found: {config_path}")
+                return
 
-        # update partition peers
-        self.peers = self._build_peer_list(new_config, self.node_id)
-        # update client_pool
-        self._setup_client_pool()
-        # logger.info (f"[POOL] after update = {list(self.client_pool.clients.keys())}")
+            with open(config_path, 'r') as f:
+                # Thêm log để xem file path tuyệt đối
+                # logger.info(f"Reading config from: {config_path.absolute()}")
+                new_config = yaml.safe_load(f)
+            
+            # debug log
+            partitions = new_config.get('cluster', {}).get('partitions', [])
+            status = 'unknown'
+            if partitions and len(partitions) > 0:
+                status = partitions[0].get('status')
+            
+            # Chỉ log khi status thay đổi hoặc khi đang nghi ngờ lỗi
+            # logger.info(f"[CONFIG DEBUG] Partition Status in file: {status}")
+
+            # Update status logic...
+            for node in new_config['cluster']['nodes']:
+                if node['id'] == self.node_id:
+                    self.status = node['status']
+                    break
+            
+            # Update peers
+            self.peers = self._build_peer_list(new_config, self.node_id)
+            
+            # Update client pool
+            self._setup_client_pool()
+            
+        except Exception as e:
+            logger.error(f"Error updating config: {e}")
         
         
     def _get_node_partition(self, config: Dict, node_id: str) -> Optional[set]:
@@ -178,7 +191,30 @@ class RaftNode:
         for client_id in stale_clients:
             self.client_pool.remove_node(client_id)
             
+    def _update_commit_index(self):
+        """
+        Kiểm tra xem có thể tăng commit_index không dựa trên match_index của các peers
+        """
+        # Lấy match_index của chính mình (luôn là log cuối cùng)
+        match_indexes = [self.log_manager.get_last_log_index()]
+        
+        # Lấy match_index của các peers
+        for peer_id in self.peers:
+            match_indexes.append(self.match_index.get(peer_id, 0))
             
+        # Sắp xếp giảm dần để tìm điểm Commit (median)
+        match_indexes.sort(reverse=True)
+        
+        # Commit point là điểm mà quá bán nodes đã lưu
+        total_nodes = len(self.peers) + 1
+        majority_idx = match_indexes[total_nodes // 2]
+        
+        if majority_idx > self.commit_index:
+            # Chỉ commit log của term hiện tại
+            if self.log_manager.get_log_term(majority_idx) == self.current_term:
+                self.commit_index = majority_idx
+                self._apply_committed_entries()
+                logger.info(f"Commit Index updated to {self.commit_index}")     
             
         
     def _random_election_timeout(self) -> float:
@@ -341,6 +377,7 @@ class RaftNode:
     def _heartbeat_loop(self):
         """Send periodic heartbeats to followers"""
         while self.running and self.state == NodeState.LEADER:
+            self._update_node_config()
             self._send_heartbeats()
             time.sleep(self.heartbeat_interval)
     
@@ -385,16 +422,16 @@ class RaftNode:
         
         if response:
             with self.lock:
-                # Check term
                 if response['term'] > self.current_term:
                     self._revert_to_follower(response['term'])
                     return
                 
-                # Update match/next index
                 if response['success']:
                     if entries:
                         self.match_index[peer_id] = prev_log_index + len(entries)
                         self.next_index[peer_id] = self.match_index[peer_id] + 1
+                        # Update commit index
+                        self._update_commit_index()
                 else:
                     # Decrement next_index and retry
                     self.next_index[peer_id] = max(1, self.next_index[peer_id] - 1)
@@ -411,12 +448,15 @@ class RaftNode:
         self.last_heartbeat_time = time.time()
     
     # RPC Handlers
-    
     def handle_request_vote(self, request) -> Dict:
         """Handle RequestVote RPC"""
 
         self._update_node_config() 
         if self.status == 'down':
+            return {'term': self.current_term, 'vote_granted': False}
+        
+        if request.candidate_id not in self.peers:
+            # logger.warning(f"🚫 [FIREWALL] Ignored Vote Request from {request.candidate_id} (Partitioned)")
             return {'term': self.current_term, 'vote_granted': False}
         
         with self.lock:
@@ -461,9 +501,14 @@ class RaftNode:
     
     def handle_append_entries(self, request) -> Dict:
         """Handle AppendEntries RPC"""
-
+        
+        # 1. Update Config & Check Down
         self._update_node_config() 
         if self.status == 'down':
+            return {'term': self.current_term, 'success': False}
+
+        # 2. Firewall Check (Partition)
+        if request.leader_id not in self.peers:
             return {'term': self.current_term, 'success': False}
         
         with self.lock:
@@ -490,7 +535,7 @@ class RaftNode:
             if not self.log_manager.check_log_consistency(request.prev_log_index, request.prev_log_term):
                 return response
             
-            # Append entries
+            # Only append if there are entries
             if len(request.entries) > 0:
                 entries_to_save = []
                 for entry in request.entries:
@@ -498,12 +543,13 @@ class RaftNode:
                         'term': entry.term,
                         'index': entry.index,
                         'command': entry.command,
-                        'client_id': getattr(entry, 'client_id', None) # Dùng getattr phòng trường hợp thiếu trường này
+                        'client_id': getattr(entry, 'client_id', None)
                     })
                 
-                # Lưu list dictionary vào log manager thay vì list object
                 self.log_manager.append_entries(request.prev_log_index, entries_to_save)
-                logger.info(f"[FOLLOWER] Appended {len(entries_to_save)} entries")
+                logger.info(f"📥 [APPEND] Accepted {len(entries_to_save)} entries from {request.leader_id}")
+            
+            # ------------------------------------
             
             # Update commit index
             if request.leader_commit > self.commit_index:
@@ -514,18 +560,25 @@ class RaftNode:
             return response
     
     def handle_client_request(self, request) -> Dict:
-        """Handle client request"""
+        """
+        Xử lý request từ client (GET/SET)
+        Cơ chế: Leader ghi log -> Replicate -> Chờ Quorum -> Commit -> Trả về kết quả
+        """
+        # 1. Cập nhật config để biết trạng thái mạng hiện tại (Partition/Down)
         self._update_node_config()
+        
         if self.status == 'down':
             logger.warning(f"Node {self.node_id} is DOWN. Rejecting client request.")
             return {
-                'success': False,
+                'success': False, 
                 'error': 'Node is down',
                 'leader_id': None
             }
         
+        # 2. Kiểm tra vai trò Leader
+        # Chỉ Leader mới được nhận Write request. 
+        # (Với Read request, Strong Consistency cũng yêu cầu check Leader)
         with self.lock:
-            # Only leader handles client requests
             if self.state != NodeState.LEADER:
                 return {
                     'success': False,
@@ -533,70 +586,77 @@ class RaftNode:
                     'leader_id': self.leader_id
                 }
             
-            # Parse command
+            # 3. Parse lệnh
             command = request.command
             parts = command.split()
-            
-            if len(parts) == 0:
+            if not parts:
                 return {'success': False, 'error': 'Empty command'}
             
             operation = parts[0].upper()
             
-            # Handle GET (read-only, no log)
-            if operation == 'GET' and len(parts) == 2:
+            # --- XỬ LÝ GET (READ) ---
+            if operation == 'GET':
+                if len(parts) < 2:
+                    return {'success': False, 'error': 'Missing key for GET'}
                 key = parts[1]
                 value = self.state_machine.get(key)
                 return {
                     'success': True,
                     'result': value if value is not None else 'Key not found'
                 }
-            
-            # Handle SET/DELETE (write operations, need log)
-            # Append to log
+
+            # --- XỬ LÝ SET/DELETE (WRITE) ---
+            # Tạo Log Entry và lưu cục bộ
+            entry_index = self.log_manager.get_last_log_index() + 1
             entry = {
                 'term': self.current_term,
-                'index': self.log_manager.get_last_log_index() + 1,
+                'index': entry_index,
                 'command': command,
-                'client_id': request.client_id
+                'client_id': getattr(request, 'client_id', None)
             }
             
             self.log_manager.append_entry(entry)
-            logger.info(f"Appended entry: {entry}")
-            
-            # Replicate to followers (simplified - would wait for majority)
+            logger.info(f"[LEADER] Received command: {command}. Appended to log index {entry_index}")
+
+            # Kích hoạt Replication ngay lập tức (không chờ Heartbeat timer)
             self._send_heartbeats()
-            
-            # Đếm số lượng node đang hoạt động (dựa trên config)
-            # Trong thực tế, ta đếm match_index, nhưng ở đây dùng config để giả lập nhanh
-            active_nodes = 1 # Tính cả bản thân Leader
-            current_config = self._load_config_from_file() # Hàm đọc file yaml
-            
-            for node in current_config['cluster']['nodes']:
-                if node['id'] != self.node_id and node.get('status') == 'up':
-                    active_nodes += 1
-            
-            total_nodes = len(current_config['cluster']['nodes'])
-            quorum = (total_nodes // 2) + 1
 
-            # Chờ một chút giả lập độ trễ mạng
-            time.sleep(0.05)
+        # Chờ Commit (WAIT FOR QUORUM)
+        # Leader sẽ chờ cho đến khi entry_index được replicate sang quá bán các node
+        # và commit_index được cập nhật.
+        
+        timeout = 5.0  # Timeout chờ đồng thuận (giây)
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            # Ngủ ngắn để không chiếm dụng CPU
+            time.sleep(0.05) 
+            
+            with self.lock:
+                # Nếu mất chức Leader trong lúc chờ (do partition hoặc node khác lên ngôi)
+                if self.state != NodeState.LEADER:
+                    return {
+                        'success': False, 
+                        'error': 'Lost leadership during replication',
+                        'leader_id': None
+                    }
+                
+                # KIỂM TRA ĐIỀU KIỆN THÀNH CÔNG:
+                # Nếu commit_index đã vượt qua hoặc bằng index của log vừa tạo
+                if self.commit_index >= entry_index:
+                    logger.info(f"[LEADER] Command {command} committed at index {entry_index}")
+                    return {
+                        'success': True,
+                        'result': 'OK'
+                    }
 
-            if active_nodes >= quorum:
-                # Đủ quorum -> Commit
-                self.commit_index = self.log_manager.get_last_log_index()
-                self._apply_committed_entries()
-                return {
-                    'success': True,
-                    'result': 'OK'
-                }
-            else:
-                # Không đủ quorum -> Không commit -> Trả về lỗi
-                logger.error(f"Cannot commit. Active: {active_nodes}/{total_nodes} (Need {quorum})")
-                return {
-                    'success': False,
-                    'error': 'Cluster currently unavailable (No Quorum)',
-                    'leader_id': self.leader_id
-                }
+        # Nếu hết timeout mà vẫn chưa commit được (do Partition không đủ Quorum)
+        logger.error(f"[LEADER] Timeout waiting for commit index {entry_index}. Possible partition.")
+        return {
+            'success': False,
+            'error': 'Request Timeout (Cluster unstable or Partitioned)',
+            'leader_id': self.leader_id
+        }
     
     def _apply_committed_entries(self):
         """Apply committed entries to state machine"""

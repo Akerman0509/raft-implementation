@@ -1,65 +1,47 @@
-# RAFT Cluster Configuration
-
 cluster:
+  nodes:
+  - host: localhost
+    id: node1
+    port: 50051
+    status: up
+  - host: localhost
+    id: node2
+    port: 50052
+    status: up
+  - host: localhost
+    id: node3
+    port: 50053
+    status: up
+  - host: localhost
+    id: node4
+    port: 50054
+    status: up
+  - host: localhost
+    id: node5
+    port: 50055
+    status: up
+  partitions:
+  - status: disabled
+  - id: part1
     nodes:
-        - id: "node1"
-          host: "localhost"
-          port: 50051
-          status: "up"
-        - id: "node2"
-          host: "localhost"
-          port: 50052
-          status: "up"
-          # status: "down"
-
-        - id: "node3"
-          host: "localhost"
-          port: 50053
-          status: "up"
-
-        - id: "node4"
-          host: "localhost"
-          port: 50054
-          status: "up"
-
-        - id: "node5"
-          host: "localhost"
-          port: 50055
-          status: "up"
-
-    partitions:
-        # - status: "enabled"
-        - status: "disabled"
-        - id: "partition1"
-          nodes: ["node1", "node2"]
-        - id: "partition2"
-          nodes: ["node3", "node4", "node5"]
-
-raft:
-    # Election timeout range (ms)
-    election_timeout_min: 1500
-    election_timeout_max: 3000
-
-    # Heartbeat interval (ms)
-    heartbeat_interval: 2000
-
-    # RPC timeout (ms)
-    rpc_timeout: 100
-
-    # Number of retries for failed RPCs
-    max_retries: 3
-
-storage:
-    # Directory for persistent storage
-    data_dir: "./data"
-
-    # Enable/disable persistent storage
-    persistent: true
-
-    # Snapshot interval (number of log entries)
-    snapshot_interval: 100
-
+    - node1
+    - node2
+    - node3
+  - id: part2
+    nodes:
+    - node4
+    - node5
 logging:
-    level: "INFO" # DEBUG, INFO, WARNING, ERROR
-    file: "./logs/raft.log"
-    console: true
+  console: true
+  file: ./logs/raft.log
+  level: INFO
+raft:
+  election_timeout_max: 3000
+  election_timeout_min: 1500
+  heartbeat_interval: 500
+  max_retries: 3
+  rpc_timeout: 100
+storage:
+  data_dir: ./data
+  persistent: true
+  snapshot_interval: 100
