@@ -34,32 +34,50 @@ Triển khai thuật toán đồng thuận RAFT sử dụng Python và gRPC vớ
     - Request/Response handling
 
 ## Lệnh chạy
+
 ### Cài môi trường
+
 ```
 pip install -r requirements.txt
 ```
+
+### Compile file .proto
+
+```
+python -m compile
+```
+
 ### Khởi động các node
+
 **1. Linux**
+
 ```
 for i in {1..5}; do
   gnome-terminal -- bash -c "python main.py --node-id node$i --port $((50050+i)); exec bash" &
 done
 ```
-Nếu terminal của bạn là loại khác, hãy thay `gnome-terminal --` bằng lệnh gọi terminal tương ứng. 
 
+Nếu terminal của bạn là loại khác, hãy thay `gnome-terminal --` bằng lệnh gọi terminal tương ứng.
 
-**2. Windows**: 
+**2. Windows**:
+
 ```
 for /L %i in (1,1,5) do start python main.py --node-id node%i --port 5005%i
 
 ```
+
 Sử dụng Command Prompt
+
 ### Sử dụng file test
+
 **1. Test đồng bộ & ngưỡng chịu đựng**
+
 ```
 python test_failure.py
 ```
+
 **2. Test khả năng đồng bộ trong phân mảnh mạng**
+
 ```
 python test_sync_partition.py
 ```
