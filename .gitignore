@@ -68,3 +68,6 @@ Thumbs.db
 # =========================
 # gRPC / Protobuf generated
 # ================
+
+*.json
+raft_pb2*
